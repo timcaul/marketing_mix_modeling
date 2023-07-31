@@ -1,0 +1,1284 @@
+---
+title: "MMM FB Data"
+author: "Tim Cauley"
+date: '2023-07-07'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Import Packages and Data
+
+```{r message=FALSE, warning=FALSE}
+library(Robyn) ## Data and Facebook Model
+library(tidyverse) ## Data cleaning and visualization
+library(corrplot) ## Correlation Matrix
+library(MLmetrics) ## MAPE function
+library(ggpubr) ## visualization formatting
+library(MASS) ## feature selection
+library(forecast)
+library(car)
+library(caret)
+library(nlme) ## GLS
+library(bsts) ## bsts
+library(xgboost) ## xgboost
+```
+
+
+```{r}
+data <- read.csv("/Users/Tim/Downloads/fb_mmm_data.csv")
+
+data$DATE <- as.Date(data$DATE, format = "%m/%d/%Y")
+
+data_train <- data[1:156,]
+data_test <- data[157:208,]
+```
+
+
+# EDA
+
+## Visualizations
+
+```{r}
+ggplot(data, aes(x=DATE, y=revenue))+
+  geom_line()+
+  xlab("Week Ending")+
+  ylab("Revenue (USD)")+
+  ggtitle("Weekly Brand Revenue")
+
+g1 <- ggplot(data, aes(x=DATE, y=facebook_S))+
+  geom_line()+
+  xlab("Week Ending")+
+  ylab("Spend (USD)")+
+  ggtitle("Weekly Facebook Spend")
+
+g2 <- ggplot(data, aes(x=DATE, y=ooh_S))+
+  geom_line()+
+  xlab("Week Ending")+
+  ylab("Spend (USD)")+
+  ggtitle("Weekly OOH Spend")
+
+g3 <- ggplot(data, aes(x=DATE, y=tv_S))+
+  geom_line()+
+  xlab("Week Ending")+
+  ylab("Spend (USD)")+
+  ggtitle("Weekly TV Spend")
+
+g4 <- ggplot(data, aes(x=DATE, y=print_S))+
+  geom_line()+
+  xlab("Week Ending")+
+  ylab("Spend (USD)")+
+  ggtitle("Weekly Print Spend")
+
+g5 <- ggplot(data, aes(x=DATE, y=search_S))+
+  geom_line()+
+  xlab("Week Ending")+
+  ylab("Spend (USD)")+
+  ggtitle("Weekly Search Spend")
+
+ggarrange(g1, g2, g3, g4, g5, 
+          ncol = 3, nrow = 2)
+```
+
+```{r}
+data %>%
+mutate(month = format(DATE, "%m"), year = format(DATE, "%Y")) %>%
+group_by(month) %>%
+summarise(total = mean(revenue)) %>% 
+ggplot(aes(month, total))+
+  geom_col()+
+  ggtitle("Average Revenue per Month")+
+  ylab("Revenue (USD)")
+```
+
+```{r}
+data_train %>%
+mutate(month = format(DATE, "%m"), year = format(DATE, "%Y")) %>%
+group_by(month) %>%
+summarise(total = sum(tv_S+ooh_S+print_S+search_S+facebook_S)/35224224/108.51) %>% 
+ggplot(aes(month, total))+
+  geom_col(fill="gray30")+
+  ggtitle("Average Media Spend per Month")+
+  ylab("Spend %")+
+  geom_text(aes(label = round(10000*total,2)), vjust = -0.2)+
+  theme_gray()
+```
+
+```{r}
+monthly_spend_perc <- c(0.0912, 0.0417, 0.044, 0.0874, 0.0564, 0.0379, 0.0839, 0.0811, 0.0928, 0.1429, 0.101, 0.1397)
+
+test_spend_month_amts <- monthly_spend_perc * sum(data_test$revenue)
+```
+
+
+```{r}
+data %>%
+summarise(tv = sum(tv_S)/48, ooh = sum(ooh_S)/48, print = sum(print_S)/48, facebook = sum(facebook_S)/48, search = sum(search_S)/48) %>% 
+gather(variable, value) %>%
+  ggplot(aes(x = reorder(variable, -value), y = value)) +
+  geom_bar(stat = "identity") +
+  labs(x = "Media Channel", y = "Monthly Spend", title = "Monthly Media Spend") +
+  theme(legend.position = "none")+ 
+  geom_text(aes(label = round(value,2)), vjust = -0.2)
+```
+
+```{r}
+M = cor(data[,-1])
+corrplot(M, method = 'color')
+```
+```{r}
+M = cor(data[,2:12])
+corrplot(M, method = 'color')
+```
+
+## Leading Indicators
+
+Correlations with Revenue
+```{r}
+cor_cols <- names(data)[!(names(data) %in% c("DATE", "revenue"))]
+
+correlations <- sapply(cor_cols, function(var_name) cor(data[[var_name]], data[["revenue"]]))
+
+for(i in 1:length(cor_cols)){
+  print(correlations[i])
+}
+
+```
+
+Correlations with lagged revenue 
+
+```{r}
+for(col in 3:15){
+
+best <- 0
+besti <- 0
+for(i in 0:12){
+  curr <- cor(data[,col][1:(length(data[['revenue']])-i)], data[['revenue']][(i+1):length(data[['revenue']])])
+  
+  if(abs(curr) > abs(best)){
+    best <- curr
+    besti <- i
+  }
+}
+
+print(paste(colnames(data)[col], "lag", besti, "correlation:", best))
+}
+```
+
+Correlations with lagged revenue and decay
+
+```{r}
+
+for(col in c(3,4,5,6,7,8,10)){
+
+best <- 0
+besti <- 0
+bestr <- 0
+for(i in 0:12){
+for (r in 0:100){
+  rate <- r/100
+  temp <- as.numeric(stats::filter(data[,col][1:(length(data[['revenue']])-i)], rate, method="recursive"))
+  curr <- cor(temp, data[['revenue']][(i+1):length(data[['revenue']])])
+  
+  if(abs(curr) > abs(best)){
+    best <- curr
+    besti <- i
+    bestr <- r
+  }
+}
+}
+
+print(paste(colnames(data)[col], "lag:", besti, "rate:", bestr, "correlation:", best))
+}
+```
+
+Correlations with lagged revenue, decay, and log
+
+```{r}
+
+for(col in c(3,4,5,6,7,8,10)){
+
+best <- 0
+besti <- 0
+bestr <- 0
+for(i in 0:12){
+for (r in 0:100){
+  rate <- r/100
+  temp <- as.numeric(stats::filter(data[,col][1:(length(data[['revenue']])-i)], rate, method="recursive"))
+  curr <- cor(log1p(temp), data[['revenue']][(i+1):length(data[['revenue']])])
+  
+  if(abs(curr) > abs(best)){
+    best <- curr
+    besti <- i
+    bestr <- r
+  }
+}
+}
+
+print(paste(colnames(data)[col], "lag:", besti, "rate:", bestr, "correlation:", best))
+}
+```
+
+# Modeling
+
+## OLS
+
+### Opt. Adstock rates
+
+```{r}
+adstock <- function(col, rate){
+  
+  new <- as.numeric(stats::filter(col, rate, method="recursive"))
+  
+  return(log1p(new))   
+}
+
+opt_adstock <- function(data1){
+
+  
+  best_error <- 100
+  best_rate_tv <- 0
+  best_rate_ooh <- 0
+  best_rate_print <- 0
+  best_rate_search <- 0
+  best_rate_fb <- 0
+  best_rate_newsletter <- 0
+  
+  for(i in c(30,40,50,60,70,80)){
+    for(j in c(10,20,30,40)){
+      for(k in c(10,20,30,40)){
+        for(l in c(0,10,20,30,40)){
+          for(m in c(0,10,20,30,40)){
+
+      rate_tv <- i/100
+      rate_ooh <- j/100
+      rate_print <- k/100
+      rate_search <- l/100
+      rate_fb <- m/100
+
+      
+      temp <- data1
+      
+      temp$tv_S <- adstock(temp$tv_S, rate_tv)
+      temp$ooh_S <- adstock(temp$ooh_S, rate_ooh)
+      temp$print_S <- adstock(temp$print_S, rate_print)
+      temp$search_S <- adstock(temp$search_S, rate_search)
+      temp$facebook_S <- adstock(temp$tv_S, rate_fb)
+
+      
+      
+      error <- MAPE(predict(lm(revenue~., temp[-1]), temp[-c(1)]), temp$revenue)
+      
+      if(error < best_error){
+        best_error <- error
+        best_rate_tv <- rate_tv
+        best_rate_ooh <- rate_ooh
+        best_rate_print <- rate_print
+        best_rate_search <- rate_search
+        best_rate_fb <- rate_fb
+
+      }
+      
+
+    }
+        }
+      }
+    }
+  }
+  
+  print("Error")
+  print(best_error)
+  print("TV")
+  print(best_rate_tv)
+  print("OOH")
+  print(rate_ooh)
+  print("Print")
+  print(best_rate_print)
+  print("Search")
+  print(best_rate_search)
+  print("Facebook")
+  print(best_rate_fb)
+
+  
+}
+
+```
+
+
+```{r}
+opt_adstock(data_train)
+```
+
+
+```{r}
+ols_data <- data
+
+ols_data$tv_S <- adstock(ols_data$tv_S, 0.7)
+ols_data$ooh_S <- adstock(ols_data$ooh_S, 0.4)
+ols_data$print_S <- adstock(ols_data$print_S, 0.1)
+ols_data$search_S <- adstock(ols_data$search_S, 0)
+ols_data$facebook_S <- adstock(ols_data$facebook_S, 0.1)
+
+ols_train <- ols_data[1:156,]
+ols_test <- ols_data[157:208,]
+```
+
+### Building model, visualizations, statistical tests
+
+```{r}
+M1_ols <- lm(revenue ~., ols_train[-1])
+M0_ols <- lm(revenue ~tv_S + ooh_S + print_S + search_S + facebook_S, ols_train[-1])
+M1_ols.step <- step(M1_ols, scope = list(lower = M0_ols, upper = M1_ols),direction = "both", k = 2, trace=FALSE)
+
+summary(M1_ols.step)
+```
+
+```{r}
+set.seed(7)
+
+train_control <- trainControl(method = "cv", number = 5)
+
+cv_model <- train(revenue ~ tv_S + ooh_S + print_S + facebook_I + 
+    search_S + competitor_sales_B + facebook_S + events + apr + 
+    new_years + mothers_day + christmas, data = ols_train[-1], method = "lm", trControl = train_control)
+
+ols_final <- cv_model$finalModel
+```
+```{r}
+cv_model$resample
+```
+
+```{r}
+## Val MAPE
+(mean(cv_model$resample$MAE) / mean(ols_train$revenue)) * 100
+```
+
+
+
+```{r}
+summary(ols_final)
+
+anova(ols_final)
+```
+
+
+```{r}
+MAPE(predict(ols_final, ols_train), ols_train$revenue)
+
+MAPE(predict(ols_final, ols_test), ols_test$revenue)
+```
+
+
+
+```{r}
+ols_predictions <- predict(ols_final, ols_data)
+
+ggplot(ols_data)+
+  geom_line(aes(x=DATE, y=ols_predictions, col="red"))+
+  geom_line(aes(x=DATE, y=revenue, col="blue"))+
+  scale_color_discrete(labels=c('Actual', 'Predicted'))+
+  geom_vline(xintercept = as.Date("2018-11-19"))+
+  ggtitle("Actual vs Predicted Revenue (OLS)")+ xlab("Date")+ ylab("Revenue (USD)")
+```
+
+```{r}
+plot(ols_final)
+```
+
+
+
+```{r}
+checkresiduals(ols_final)
+```
+
+
+```{r}
+durbinWatsonTest(ols_final)
+```
+
+p-value > 0.05 = no autocorrelation
+
+### ROAS and Attributions
+
+```{r}
+calculate_contributions <- function(data, coefficients) {
+
+  variable_names <- names(coefficients)[-1]  
+  
+  contributions <- numeric(length(variable_names))
+  
+  for (i in 1:length(variable_names)) {
+    variable <- variable_names[i]
+    contribution <- sum(data[[variable]] * coefficients[variable])
+    contributions[i] <- contribution
+  }
+  
+  contributions <- setNames(contributions, variable_names)
+  
+  return(contributions)
+}
+```
+
+```{r}
+calculate_contributions(ols_train, ols_final$coefficients)
+```
+
+```{r}
+contributions_ols <- numeric(6)
+
+contributions_ols[1] <- 128711175.4  
+contributions_ols[2] <- -2703986.5
+contributions_ols[3] <- 8959435.6 
+contributions_ols[4] <- 1026172.2
+contributions_ols[5] <- 4518989.9 -13206443.2
+contributions_ols[6] <- 257933352.4 + 600671.5  + 2227801.5 + 1104899.3  + 3499080.8  + 2931414.6 
+
+contributions_ols <- setNames(contributions_ols, c("TV", "OOH", "Print", "Search", "Facebook", "Base"))
+
+contributions_ols
+
+```
+
+```{r}
+contributions_ols / sum(contributions_ols)*100
+```
+
+```{r}
+##ROI's
+spends <- numeric(5)
+spends[1] <- sum(data_train$tv_S)
+spends[2] <- sum(data_train$ooh_S)
+spends[3] <- sum(data_train$print_S)
+spends[4] <- sum(data_train$search_S)
+spends[5] <- sum(data_train$facebook_S)
+
+contributions_ols[1:5]/spends*100
+
+
+sum(contributions_ols[1:5])/sum(spends)*100
+```
+
+
+
+
+
+### Budget Optimization
+
+
+```{r}
+budget_opt <- function(budget, coeff){
+  best <- 0
+  channel <- 0
+  spends <- numeric(5)
+  spends <- setNames(spends, c("tv_S", "ooh_S", "print_S", "search_S", "facebook_S"))
+  
+  for(d in 1:(budget/16)){
+    best <- 0
+    channel <- 0
+    
+    for(i in 1:5){
+      if(coeff[names(spends[i])]>0){
+      temp <- (log((spends[i]+16))*coeff[names(spends[i])]) - (coeff[names(spends[i])]*log1p(spends[i]))}
+      if(temp>best){
+        best <- temp
+        channel <- i
+      }
+    }
+    spends[channel] <- spends[channel]+16
+    
+  }
+  
+  print(spends)
+}
+```
+
+```{r}
+budget_opt(38224224,ols_final$coefficients)
+```
+
+```{r}
+ols_bud_opt <- c(34162656, 0, 3674032, 387536, 0)
+
+ols_bud_opt / 38224224
+```
+
+```{r}
+create_opt_budget_ols <- function(data, amounts){
+  
+  temp <- data
+  temp$facebook_I <- numeric(52)
+  num_weeks <- numeric(12)
+  for(i in 1:52){
+    num_weeks[as.numeric(format(temp$DATE[i], "%m"))] <- num_weeks[as.numeric(format(temp$DATE[i], "%m"))] +1
+  }
+  
+  amounts_week <- numeric(12)
+  for(i in 1:12){
+    amounts_week[i] <- monthly_spend_perc[i] / num_weeks[i]
+  }
+  
+  
+  for(i in 1:52){
+    temp$tv_S[i] <- amounts_week[as.numeric(format(temp$DATE[i], "%m"))] * amounts[1]
+    temp$ooh_S[i] <- amounts_week[as.numeric(format(temp$DATE[i], "%m"))] * amounts[2]
+    temp$print_S[i] <- amounts_week[as.numeric(format(temp$DATE[i], "%m"))] * amounts[3]
+    temp$search_S[i] <- amounts_week[as.numeric(format(temp$DATE[i], "%m"))] * amounts[4]
+    temp$facebook_S[i] <- amounts_week[as.numeric(format(temp$DATE[i], "%m"))] * amounts[5]
+  }
+  
+  return(temp)
+  
+}
+```
+
+
+```{r}
+ols_bud_opt_test <- create_opt_budget_ols(data_test, ols_bud_opt)
+
+ols_bud_opt_data <- rbind(data_train, ols_bud_opt_test)
+
+ols_bud_opt_data$tv_S <- adstock(ols_bud_opt_data$tv_S, 0.7)
+ols_bud_opt_data$ooh_S <- adstock(ols_bud_opt_data$ooh_S, 0.4)
+ols_bud_opt_data$print_S <- adstock(ols_bud_opt_data$print_S, 0.1)
+ols_bud_opt_data$search_S <- adstock(ols_bud_opt_data$search_S, 0)
+ols_bud_opt_data$facebook_S <- adstock(ols_bud_opt_data$facebook_S, 0.1)
+
+
+ols_bud_opt_data <- ols_bud_opt_data[157:208,]
+```
+
+```{r}
+ols_opt_pred <- predict(ols_final, ols_bud_opt_data)
+```
+
+```{r}
+sum(ols_opt_pred)
+
+(sum(ols_opt_pred) -sum(data_test$revenue))/sum(data_test$revenue)
+```
+
+```{r}
+sum(ols_opt_pred)
+
+(sum(ols_opt_pred) -sum(predict(ols_final, ols_test)))/sum(predict(ols_final, ols_test))
+```
+
+```{r}
+ols_test_predictions <- predict(ols_final, ols_test)
+
+ggplot(ols_test)+
+  geom_line(aes(x=DATE, y=ols_opt_pred, col="red"))+
+  geom_line(aes(x=DATE, y=ols_test_predictions, col="blue"))+
+  scale_color_discrete(labels=c('Actual Allocation', 'Opt. Allocation'))+
+  geom_vline(xintercept = as.Date("2018-11-19"))+
+  ggtitle("Optimized Budget Allocation (OLS)")+ xlab("Date")+ ylab("Revenue (USD)")
+```
+
+
+
+## BSTS
+
+### Building model and visualizations
+
+
+```{r}
+bsts_data <- data[-c(1, 13:30)]
+rownames(bsts_data) <- bsts_data$DATE
+bsts_data$tv_S <- log1p(bsts_data$tv_S)
+bsts_data$ooh_S <- log1p(bsts_data$ooh_S)
+bsts_data$print_S <- log1p(bsts_data$print_S)
+bsts_data$search_S <- log1p(bsts_data$search_S)
+bsts_data$facebook_S <- log1p(bsts_data$facebook_S)
+
+bsts_train <- bsts_data[1:156,]
+bsts_test <- bsts_data[157:208,]
+```
+
+
+```{r}
+(model_components <- list())
+
+summary(model_components <- AddLocalLinearTrend(model_components, 
+                                        y = bsts_train$revenue))
+
+summary(model_components <- AddSeasonal(model_components, y = bsts_train$revenue, 
+                                  nseasons  = 52))
+```
+
+```{r}
+bsts_mod <- bsts(revenue ~ ., state.specification = model_components, 
+              data = bsts_train, niter = 10000, seed=7)
+```
+
+```{r}
+bsts_train_pred <- predict(bsts_mod, newdata = bsts_train, horizon = 52)
+bsts_test_pred <- predict(bsts_mod, newdata = bsts_test, horizon = 52)
+
+bsts_preds <- predict(bsts_mod, newdata = bsts_data, horizon = 52)
+
+```
+
+```{r}
+cor(data_train$revenue,bsts_train_pred$mean)^2
+```
+
+
+```{r}
+plot(bsts_mod)
+```
+
+
+
+```{r}
+MAPE(bsts_train_pred$mean, data_train$revenue)
+
+MAPE(bsts_test_pred$mean, data_test$revenue)
+```
+
+```{r}
+ggplot(ols_data)+
+  geom_line(aes(x=DATE, y=bsts_preds$mean, col="red"))+
+  geom_line(aes(x=DATE, y=revenue, col="blue"))+
+  scale_color_discrete(labels=c('Actual', 'Predicted'))+
+  geom_vline(xintercept = as.Date("2018-11-19"))+
+  ggtitle("Actual vs Predicted Revenue (BSTS)")+ xlab("Date")+ ylab("Revenue (USD)")
+```
+
+```{r}
+AcfDist(residuals(bsts_mod))
+```
+All means are low (well <0.2) and scattered about 0 = no autocorrelation
+
+```{r}
+plot(c(1:156), colMeans(residuals(bsts_mod)))
+```
+residuals scattered about 0
+
+### Contributions and ROI
+
+```{r}
+colMeans(bsts_mod$coefficients)
+```
+
+
+```{r}
+bsts_all_cont <- calculate_contributions(bsts_train, colMeans(bsts_mod$coefficients))
+bsts_all_cont
+```
+
+```{r}
+contributions_bsts <- numeric(6)
+
+contributions_bsts[1] <- bsts_all_cont[1]  
+contributions_bsts[2] <- bsts_all_cont[2] 
+contributions_bsts[3] <- bsts_all_cont[3]  
+contributions_bsts[4] <- bsts_all_cont[5] + bsts_all_cont[6] 
+contributions_bsts[5] <- bsts_all_cont[4] + bsts_all_cont[8]  
+contributions_bsts[6] <- sum(bsts_all_cont) - sum(contributions_ols[1:5]) 
+
+contributions_bsts <- setNames(contributions_bsts, c("TV", "OOH", "Print", "Search", "Facebook", "Base"))
+
+contributions_bsts
+```
+
+```{r}
+contributions_bsts[1:5]/spends*100
+
+sum(contributions_bsts[1:5])/sum(spends)
+```
+
+
+
+```{r}
+contributions_bsts/sum(colMeans(bsts_mod$state.contributions))
+```
+
+```{r}
+sum(contributions_bsts[1:5])/sum(bsts_train_pred$mean)
+```
+
+```{r}
+sum(contributions_bsts[1:5])/sum(spends)*100
+```
+
+
+
+```{r}
+rowSums(colMeans(bsts_mod$state.contributions))
+```
+
+```{r}
+rowSums(colMeans(bsts_mod$state.contributions))
+```
+
+
+
+```{r}
+summary(bsts_mod)
+```
+
+
+
+
+### Optimizing budget
+
+```{r}
+budget_opt(38224224,colMeans(bsts_mod$coefficients))
+```
+
+```{r}
+create_opt_budget_bsts <- function(data, amounts){
+  
+  fb_i_per_dollar <- sum(data$facebook_I)/sum(data$facebook_S)
+  
+  temp <- data
+  temp$facebook_I <- numeric(52)
+  num_weeks <- numeric(12)
+  for(i in 1:52){
+    num_weeks[as.numeric(format(temp$DATE[i], "%m"))] <- num_weeks[as.numeric(format(temp$DATE[i], "%m"))] +1
+  }
+  
+  amounts_week <- numeric(12)
+  for(i in 1:12){
+    amounts_week[i] <- monthly_spend_perc[i] / num_weeks[i]
+  }
+  
+  
+  for(i in 1:52){
+    temp$tv_S[i] <- amounts_week[as.numeric(format(temp$DATE[i], "%m"))] * amounts[1]
+    temp$ooh_S[i] <- amounts_week[as.numeric(format(temp$DATE[i], "%m"))] * amounts[2]
+    temp$print_S[i] <- amounts_week[as.numeric(format(temp$DATE[i], "%m"))] * amounts[3]
+    temp$search_S[i] <- amounts_week[as.numeric(format(temp$DATE[i], "%m"))] * amounts[4]
+    temp$facebook_S[i] <- amounts_week[as.numeric(format(temp$DATE[i], "%m"))] * amounts[5]
+    temp$facebook_I[i] <- temp$facebook_S[i]*fb_i_per_dollar
+  }
+  
+  
+  
+  return(temp)
+  
+}
+```
+
+
+```{r}
+bsts_bud_opt <- c(38160864, 0, 53056, 0, 10304)
+
+bsts_bud_opt_test <- create_opt_budget_bsts(data_test, bsts_bud_opt)
+
+bsts_bud_opt_test$tv_S <- log1p(bsts_bud_opt_test$tv_S)
+bsts_bud_opt_test$ooh_S <- log1p(bsts_bud_opt_test$ooh_S)
+bsts_bud_opt_test$print_S <- log1p(bsts_bud_opt_test$print_S)
+bsts_bud_opt_test$search_S <- log1p(bsts_bud_opt_test$search_S)
+bsts_bud_opt_test$facebook_S <- log1p(bsts_bud_opt_test$facebook_S)
+
+bsts_opt_pred <- predict(bsts_mod, newdata = bsts_bud_opt_test, horizon = 52)
+```
+
+```{r}
+sum(bsts_opt_pred$mean)
+
+(sum(bsts_opt_pred$mean)-sum(data_test$revenue))/sum(data_test$revenue)
+```
+
+```{r}
+plot(data_test$DATE, bsts_opt_pred$mean, type="l")
+```
+
+
+
+
+
+
+
+## XG Boost
+
+```{r}
+xg_train <- xgb.DMatrix(data = as.matrix(data_train[, -c(1, 2)]), label = data_train$revenue)
+xg_test <- xgb.DMatrix(data = as.matrix(data_test[, -c(1, 2)]), label = data_test$revenue)
+```
+
+
+```{r}
+param_grid <- expand.grid(
+  nrounds = c(100, 200, 300),
+  max_depth = c(3, 5, 7),
+  eta = c(0.1, 0.01, 0.001),
+  gamma = c(0, 0.1, 0.2),
+  colsample_bytree = c(0.8, 0.9, 1),
+  min_child_weight = c(1, 2, 3),
+  subsample = c(0.8, 0.9, 1)
+)
+
+ctrl <- trainControl(method = "cv", number = 5)  
+
+model <- train(
+  x = as.matrix(data_train[, -c(1, 2)]), y = data_train$revenue,
+  trControl = ctrl,
+  method = "xgbTree",
+  tuneGrid = param_grid
+)
+
+print(model$bestTune)
+```
+
+```{r}
+opt_adstock_xg <- function(data1){
+
+  
+  best_error <- 100
+  best_rate_tv <- 0
+  best_rate_ooh <- 0
+  best_rate_print <- 0
+  best_rate_search <- 0
+  best_rate_fb <- 0
+  
+  params <- list(
+    objective = "reg:squarederror",  
+    eval_metric = "rmse",  
+    max_depth = 3,  
+    eta = 0.1,  
+    subsample = 0.8,  
+    colsample_bytree = 0.9,
+    min_child_weight = 1
+  )
+
+  
+  for(i in c(30,40,50,60,70,80)){
+    for(j in c(10,20,30,40)){
+      for(k in c(10,20,30,40)){
+        for(l in c(0,10,20,30,40)){
+          for(m in c(0,10,20,30,40)){
+      rate_tv <- i/100
+      rate_ooh <- j/100
+      rate_print <- k/100
+      rate_search <- l/100
+      rate_fb <- m/100
+      
+      temp <- data1
+      
+      temp$tv_S <- adstock(temp$tv_S, rate_tv)
+      temp$ooh_S <- adstock(temp$ooh_S, rate_ooh)
+      temp$print_S <- adstock(temp$print_S, rate_print)
+      temp$search_S <- adstock(temp$search_S, rate_search)
+      temp$facebook_S <- adstock(temp$tv_S, rate_fb)
+      
+      temp <- xgb.DMatrix(data = as.matrix(temp[, -c(1, 2)]), label = temp$revenue)
+      
+      temp_mod <- xgb.train(params = params, data = xg_train, nrounds = 100)
+      
+      
+      error <- MAPE(predict(temp_mod, temp), data1$revenue)
+      
+      if(error < best_error){
+        best_error <- error
+        best_rate_tv <- rate_tv
+        best_rate_ooh <- rate_ooh
+        best_rate_print <- rate_print
+        best_rate_search <- rate_search
+        best_rate_fb <- rate_fb
+
+      }
+      
+
+    }
+        }
+      }
+    }
+  }
+  
+  print("Error")
+  print(best_error)
+  print("TV")
+  print(best_rate_tv)
+  print("OOH")
+  print(rate_ooh)
+  print("Print")
+  print(best_rate_print)
+  print("Search")
+  print(best_rate_search)
+  print("Facebook")
+  print(best_rate_fb)
+  
+}
+```
+
+```{r}
+opt_adstock_xg(data_train)
+```
+
+```{r}
+xg_data <- data
+
+xg_data$tv_S <- adstock(xg_data$tv_S, 0.5)
+xg_data$ooh_S <- adstock(xg_data$ooh_S, 0.4)
+xg_data$print_S <- adstock(xg_data$print_S, 0.1)
+xg_data$search_S <- adstock(xg_data$search_S, 0.2)
+xg_data$facebook_S <- adstock(xg_data$facebook_S, 0.2)
+
+
+xg_train <- xg_data[1:156,]
+xg_test <- xg_data[157:208,]
+
+```
+
+```{r}
+ols_features <- c("tv_S", "ooh_S" ,"print_S" ,"facebook_I" ,"search_S" ,"competitor_sales_B" ,"facebook_S","events","apr" ,"new_years" ,"mothers_day" ,"christmas", "nov")
+
+xg_data <- xgb.DMatrix(data = as.matrix(xg_data[, ols_features]), label = xg_data$revenue)
+dtrain_selected <- xgb.DMatrix(data = as.matrix(xg_train[, ols_features]), label = xg_train$revenue)
+dtest_selected <- xgb.DMatrix(data = as.matrix(xg_test[, ols_features]), label = xg_test$revenue)
+```
+
+```{r}
+set.seed(7)
+
+params <- list(
+  objective = "reg:squarederror",  
+  eval_metric = "rmse",  
+  max_depth = 3,  
+  eta = 0.05,  
+  subsample = 0.8,  
+  colsample_bytree = 0.8,
+  min_child_weight = 2,
+  alpha = 0.1,
+  lambda = 1 
+)
+
+xg_model <- xgb.train(params = params, data = dtrain_selected, nrounds = 50)
+
+xg_train_pred <- predict(xg_model, dtrain_selected)
+xg_test_pred <- predict(xg_model, dtest_selected)
+
+xg_preds <- predict(xg_model, xg_data)
+
+
+```
+
+```{r}
+MAPE(xg_train_pred, data_train$revenue)
+MAPE(xg_test_pred, data_test$revenue)
+```
+
+
+```{r}
+RMSE(xg_train_pred, data_train$revenue)
+RMSE(xg_test_pred, data_train$revenue)
+
+cor(data_train$revenue,xg_train_pred)^2
+```
+
+```{r}
+acf((xg_train_pred-data_train$revenue), lag.max = 20, main = "Autocorrelation of Residuals")
+```
+
+
+
+
+```{r}
+importance <- xgb.importance(model = xg_model)
+importance <- within(importance, Gain <- factor(Gain, levels=names(sort(table(Gain),decreasing=TRUE))))
+importance$Feature <- factor(importance$Feature, levels = importance$Feature)
+```
+
+```{r}
+ggplot(importance, aes(x = Feature, y = Gain)) + 
+  geom_bar(stat = "identity", fill = "blue") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "XGBoost Feature Importance")
+```
+
+```{r}
+ggplot(ols_data)+
+  geom_line(aes(x=DATE, y=xg_preds, col="red"))+
+  geom_line(aes(x=DATE, y=revenue, col="blue"))+
+  scale_color_discrete(labels=c('Actual', 'Predicted'))+
+  geom_vline(xintercept = as.Date("2018-11-19"))+
+  ggtitle("Actual vs Predicted Revenue (XGBoost)")+ xlab("Date")+ ylab("Revenue (USD)")
+```
+
+Shapley value function from github https://github.com/pablo14/shap-values/blob/master/shap.R
+
+```{r}
+shap.score.rank <- function(xgb_model = xgb_mod, shap_approx = TRUE, 
+                            X_train = mydata$train_mm){
+  require(xgboost)
+  require(data.table)
+  shap_contrib <- predict(xgb_model, X_train,
+                          predcontrib = TRUE, approxcontrib = shap_approx)
+  shap_contrib <- as.data.table(shap_contrib)
+  shap_contrib[,BIAS:=NULL]
+  cat('make SHAP score by decreasing order\n\n')
+  mean_shap_score <- colMeans(abs(shap_contrib))[order(colMeans(abs(shap_contrib)), decreasing = T)]
+  return(list(shap_score = shap_contrib,
+              mean_shap_score = (mean_shap_score)))
+}
+
+```
+
+```{r}
+xg_shaps <- shap.score.rank(xgb_model = xg_model, 
+                              X_train =dtrain_selected,
+                              shap_approx = F
+                              )
+
+xg_shaps$mean_shap_score
+```
+
+```{r}
+xg_percentages <- xg_shaps$mean_shap_score/sum(xg_shaps$mean_shap_score)
+xg_contributions <- xg_shaps$mean_shap_score/sum(xg_shaps$mean_shap_score)*sum(xg_train_pred)
+xg_percentages
+xg_contributions
+```
+
+
+```{r}
+xg_percentages["tv_S"]+xg_percentages["facebook_S"]+xg_percentages["print_S"]+xg_percentages["facebook_I"]+xg_percentages["ooh_S"]+xg_percentages["search_S"]
+```
+
+
+```{r}
+xg_contributions["tv_S"]/sum(data_train$tv_S)*100
+(xg_contributions["facebook_S"]+xg_contributions["facebook_I"])/sum(data_train$facebook_S)*100
+xg_contributions["print_S"]/sum(data_train$print_S)*100
+xg_contributions["search_S"]/sum(data_train$search_S)*100
+xg_contributions["ooh_S"]/sum(data_train$ooh_S)*100
+
+print("Total media ROI")
+
+sum(xg_contributions["tv_S"], xg_contributions["facebook_S"], xg_contributions["facebook_I"], xg_contributions["print_S"], xg_contributions["search_S"], xg_contributions["ooh_S"])/sum(sum(data_train$tv_S), sum(data_train$facebook_S), sum(data_train$print_S), sum(data_train$search_S), sum(data_train$ooh_S))*100
+
+```
+
+### Budget Opt
+
+```{r}
+xg_media_perc <- sum(xg_percentages["tv_S"], xg_percentages["facebook_S"], xg_percentages["facebook_I"], xg_percentages["print_S"], xg_percentages["search_S"], xg_percentages["ooh_S"])
+
+xg_tv_bud_perc <- xg_percentages["tv_S"] / xg_media_perc
+xg_fb_bud_perc <- (xg_percentages["facebook_S"] +xg_percentages["facebook_I"]) / xg_media_perc
+xg_print_bud_perc <- xg_percentages["print_S"] / xg_media_perc
+xg_search_bud_perc <- xg_percentages["search_S"] / xg_media_perc
+xg_ooh_bud_perc <- xg_percentages["ooh_S"] / xg_media_perc
+
+xg_tv_bud <- 38224224 * xg_tv_bud_perc
+xg_fb_bud <- 38224224 * xg_fb_bud_perc
+xg_print_bud <- 38224224 * xg_print_bud_perc
+xg_search_bud <- 38224224 * xg_search_bud_perc
+xg_ooh_bud <- 38224224 * xg_ooh_bud_perc
+
+xg_opt_amounts <- c(xg_tv_bud, xg_ooh_bud, xg_print_bud, xg_search_bud, xg_fb_bud)
+
+```
+
+```{r}
+xg_bud_opt_test <- create_opt_budget_bsts(data_test, xg_opt_amounts)
+
+xg_bud_opt_data <- rbind(data_train, xg_bud_opt_test)
+
+xg_bud_opt_data$tv_S <- adstock(xg_bud_opt_data$tv_S, 0.5)
+xg_bud_opt_data$ooh_S <- adstock(xg_bud_opt_data$ooh_S, 0.4)
+xg_bud_opt_data$print_S <- adstock(xg_bud_opt_data$print_S, 0.1)
+xg_bud_opt_data$search_S <- adstock(xg_bud_opt_data$search_S, 0.2)
+xg_bud_opt_data$facebook_S <- adstock(xg_bud_opt_data$facebook_S, 0.2)
+
+
+xg_bud_opt_data <- xg_bud_opt_data[157:208,]
+```
+
+```{r}
+xg_bud_opt_data <- xgb.DMatrix(data = as.matrix(xg_bud_opt_data[, ols_features]), label = xg_bud_opt_data$revenue)
+
+xg_bud_opt_preds <- predict(xg_model, xg_bud_opt_data)
+```
+
+```{r}
+sum(xg_bud_opt_preds)
+MAPE(xg_bud_opt_preds, data_test$revenue)
+```
+
+```{r}
+(sum(xg_bud_opt_preds)-sum(data_test$revenue))/sum(data_test$revenue)
+```
+
+
+
+## Deep Learning Shapley Value from Python
+
+```{r}
+all_act <- read_csv("/Users/Tim/Downloads/all_act.csv", col_names = FALSE)
+all_pred <- read_csv("/Users/Tim/Downloads/all_pred.csv", col_names = FALSE)
+opt_pred <- read_csv("/Users/Tim/Downloads/opt_pred.csv", col_names = FALSE)
+
+all_act$X1 <- as.numeric(all_act$X1)
+all_pred$X1 <- as.numeric(all_pred$X1)
+opt_pred$X1 <- as.numeric(opt_pred$X1)
+```
+
+
+```{r}
+MAPE(all_pred$X1, all_act$X1)
+```
+
+
+
+
+
+
+
+
+## Robyn 
+
+```{r}
+InputCollect <- robyn_inputs(
+  dt_input = dt_simulated_weekly,
+  dt_holidays = dt_prophet_holidays,
+  date_var = "DATE", # date format must be "2020-01-01"
+  dep_var = "revenue", # there should be only one dependent variable
+  dep_var_type = "revenue", # "revenue" (ROI) or "conversion" (CPA)
+  prophet_vars = c("trend", "season", "holiday"), # "trend","season", "weekday" & "holiday"
+  prophet_country = "DE", # input country code. Check: dt_prophet_holidays
+  context_vars = c("competitor_sales_B", "events"), # e.g. competitors, discount, unemployment etc
+  paid_media_spends = c("tv_S", "ooh_S", "print_S", "facebook_S", "search_S"), # mandatory input
+  paid_media_vars = c("tv_S", "ooh_S", "print_S", "facebook_I", "search_clicks_P"), # mandatory.
+  # paid_media_vars must have same order as paid_media_spends. Use media exposure metrics like
+  # impressions, GRP etc. If not applicable, use spend instead.
+  organic_vars = "newsletter", # marketing activity without media spend
+  # factor_vars = c("events"), # force variables in context_vars or organic_vars to be categorical
+  window_start = "2015-11-23",
+  window_end = "2019-11-11",
+  adstock = "geometric" # geometric, weibull_cdf or weibull_pdf.
+)
+print(InputCollect)
+```
+
+```{r}
+hyper_names(adstock = InputCollect$adstock, all_media = InputCollect$all_media)
+
+plot_adstock(plot = FALSE)
+plot_saturation(plot = FALSE)
+
+hyper_limits()
+
+hyperparameters <- list(
+  facebook_S_alphas = c(0.5, 3),
+  facebook_S_gammas = c(0.3, 1),
+  facebook_S_thetas = c(0, 0.3),
+  print_S_alphas = c(0.5, 3),
+  print_S_gammas = c(0.3, 1),
+  print_S_thetas = c(0.1, 0.4),
+  tv_S_alphas = c(0.5, 3),
+  tv_S_gammas = c(0.3, 1),
+  tv_S_thetas = c(0.3, 0.8),
+  search_S_alphas = c(0.5, 3),
+  search_S_gammas = c(0.3, 1),
+  search_S_thetas = c(0, 0.3),
+  ooh_S_alphas = c(0.5, 3),
+  ooh_S_gammas = c(0.3, 1),
+  ooh_S_thetas = c(0.1, 0.4),
+  newsletter_alphas = c(0.5, 3),
+  newsletter_gammas = c(0.3, 1),
+  newsletter_thetas = c(0.1, 0.4),
+  train_size = c(0.5, 0.8)
+)
+
+InputCollect <- robyn_inputs(InputCollect = InputCollect, hyperparameters = hyperparameters)
+print(InputCollect)
+```
+
+
+```{r}
+OutputModels <- robyn_run(
+  InputCollect = InputCollect, # feed in all model specification
+  cores = NULL, # NULL defaults to (max available - 1)
+  iterations = 2000, # 2000 recommended for the dummy dataset with no calibration
+  trials = 5, # 5 recommended for the dummy dataset
+  ts_validation = TRUE, # 3-way-split time series for NRMSE validation.
+  add_penalty_factor = FALSE # Experimental feature. Use with caution.
+)
+print(OutputModels)
+```
+
+
+```{r}
+OutputModels$convergence$moo_distrb_plot
+OutputModels$convergence$moo_cloud_plot
+```
+
+```{r}
+if (OutputModels$ts_validation) OutputModels$ts_validation_plot
+```
+
+```{r}
+OutputCollect <- robyn_outputs(
+  InputCollect, OutputModels,
+  pareto_fronts = "auto", # automatically pick how many pareto-fronts to fill min_candidates (100)
+  # min_candidates = 100, # top pareto models for clustering. Default to 100
+  # calibration_constraint = 0.1, # range c(0.01, 0.1) & default at 0.1
+  csv_out = NULL, # "pareto", "all", or NULL (for none)
+  clusters = TRUE, # Set to TRUE to cluster similar models by ROAS. See ?robyn_clusters
+  export = FALSE, # this will create files locally
+  #plot_folder = robyn_directory, # path for plots exports and files creation
+  plot_pareto = FALSE # Set to FALSE to deactivate plotting and saving model one-pagers
+)
+```
+
+```{r}
+print(OutputCollect)
+```
+
+
+```{r}
+select_model <- "4_247_3"
+
+ExportedModel <- robyn_write(InputCollect, OutputCollect, select_model, export = FALSE)
+print(ExportedModel)
+```
+
+```{r}
+myOnePager <- robyn_onepagers(InputCollect, OutputCollect, select_model, export = FALSE)
+
+myOnePager[[select_model]]$patches$plots[[1]]
+myOnePager[[select_model]]$patches$plots[[2]]
+myOnePager[[select_model]]$patches$plots[[3]]
+```
+
+```{r}
+robyn_pred <- myOnePager[[select_model]]$data
+
+robyn_pred
+```
+
+```{r}
+MAPE(robyn_pred$predicted[1:150], robyn_pred$actual[1:150])
+MAPE(robyn_pred$predicted[151:179], robyn_pred$actual[151:179])
+MAPE(robyn_pred$predicted[180:208], robyn_pred$actual[180:208])
+MAPE(robyn_pred$predicted[151:208], robyn_pred$actual[151:208])
+MAPE(robyn_pred$predicted[156:208], robyn_pred$actual[156:208])
+```
+
+```{r}
+cor(robyn_pred$actual[1:150],robyn_pred$predicted[1:150])^2
+```
+
+```{r}
+optim_robyn <- robyn_allocator(InputCollect = InputCollect, OutputCollect = OutputCollect, select_model = select_model, scenario = "max_response", total_budget =  38224224, date_range = "last_52")
+```
+
+```{r}
+print(optim_robyn)
+```
+
+```{r}
+sum(data_test$revenue)*1.789
+```
+
+```{r}
+(166099314 - sum(data_test$revenue))/sum(data_test$revenue)
+
+(166099314 - sum(robyn_pred$predicted[156:208]))/sum(robyn_pred$predicted[156:208])
+```
+
